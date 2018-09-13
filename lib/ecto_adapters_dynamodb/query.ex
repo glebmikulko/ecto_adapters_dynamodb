@@ -6,6 +6,7 @@ defmodule Ecto.Adapters.DynamoDB.Query do
   """
 
   import Ecto.Adapters.DynamoDB.Info
+  import Ecto.Adapters.DynamoDB, only: [ecto_dynamo_log: 2]
 
   @typep key :: String.t
   @typep table_name :: String.t
@@ -16,7 +17,7 @@ defmodule Ecto.Adapters.DynamoDB.Query do
   @typep search :: [search_clause]
   @typep dynamo_response :: %{required(String.t) => term}
 
-  # parameters for get_item: 
+  # parameters for get_item:
   # TABLE_NAME::string,
   # [{LOGICAL_OP::atom, [{ATTRIBUTE::string, {VALUE::string, OPERATOR::atom}}]} | {ATTRIBUTE::string, {VALUE::string, OPERATOR::atom}}]
   #
@@ -27,18 +28,25 @@ defmodule Ecto.Adapters.DynamoDB.Query do
 
   # Regular queries
   def get_item(table, search, opts) do
+    t = :os.system_time(:millisecond)
+    IO.puts "get_best_index!(table, search)"
+    IO.inspect get_best_index!(table, search)
     results = case get_best_index!(table, search) do
       # primary key based lookup uses the efficient 'get_item' operation
       {:primary, indexes} = index->
         #https://hexdocs.pm/ex_aws/ExAws.Dynamo.html#get_item/3
         query = construct_search(index, search, opts)
-        {hash_values, op} = deep_find_key(search, hd indexes)
+        # TODO: fix this shit!
+        {_, op} = deep_find_key(search, List.last(indexes))
+        {hash_values, _} = deep_find_key(search, hd(indexes))
+
+        hash_values = List.wrap(hash_values)
 
         if op == :in,
           do: ExAws.Dynamo.batch_get_item(construct_batch_get_item_query(table, indexes, hash_values, search, construct_opts(:get_item, opts))) |> ExAws.request!,
           else: ExAws.Dynamo.get_item(table, query, construct_opts(:get_item, opts)) |> ExAws.request!
 
-      # secondary index based lookups need the query functionality. 
+      # secondary index based lookups need the query functionality.
       index when is_tuple(index) ->
         # https://hexdocs.pm/ex_aws/ExAws.Dynamo.html#query/2
         query = construct_search(index, search, opts)
@@ -46,6 +54,8 @@ defmodule Ecto.Adapters.DynamoDB.Query do
 
       :scan -> maybe_scan(table, search, opts)
     end
+    IO.puts "GET ALL request (w/o filter) took: #{:os.system_time(:millisecond) - t}ms"
+
 
     filter(results, search)  # index may have had more fields than the index did, thus results need to be trimmed.
   end
@@ -96,7 +106,7 @@ defmodule Ecto.Adapters.DynamoDB.Query do
           expression_attribute_names: Map.merge(%{"##{hash}" => hash}, expression_attribute_names),
           expression_attribute_values: [hash_key: hash_val] ++ expression_attribute_values,
         ] ++ filter_expression_tuple ++ updated_ops
-      
+
     end
   end
 
@@ -112,10 +122,10 @@ defmodule Ecto.Adapters.DynamoDB.Query do
 
   @spec construct_range_params(key, match_clause) :: {String.t, %{required(String.t) => key}, keyword()}
   defp construct_range_params(range, {[range_start, range_end], :between}) do
-    {"##{range} between :range_start and :range_end", %{"##{range}" => range}, [range_start: range_start, range_end: range_end]} 
+    {"##{range} between :range_start and :range_end", %{"##{range}" => range}, [range_start: range_start, range_end: range_end]}
   end
   defp construct_range_params(range, {prefix, :begins_with}) do
-    {"begins_with(##{range}, :prefix)", %{"##{range}" => range}, [prefix: prefix]} 
+    {"begins_with(##{range}, :prefix)", %{"##{range}" => range}, [prefix: prefix]}
   end
   defp construct_range_params(range, {range_val, :==}) do
     {"##{range} = :range_key", %{"##{range}" => range}, [range_key: range_val]}
@@ -147,7 +157,7 @@ defmodule Ecto.Adapters.DynamoDB.Query do
     case non_indexed_filters do
       [] -> {[], %{}, []}
       _  ->
-        {filter_expression_list, expression_attribute_names, expression_attribute_values} = 
+        {filter_expression_list, expression_attribute_names, expression_attribute_values} =
           build_filter_expression_data(non_indexed_filters, {[], %{}, %{}})
 
         {[filter_expression: Enum.join(filter_expression_list, " and ")],
@@ -187,7 +197,7 @@ defmodule Ecto.Adapters.DynamoDB.Query do
       {field, {val, op} = val_op_tuple} = complete_tuple when is_tuple(val_op_tuple) ->
         updated_filter_exprs = [construct_conditional_statement(complete_tuple) | filter_exprs]
         updated_attr_names = Map.merge(%{"##{field}" => field}, attr_names)
-        updated_attr_values = Map.merge(format_expression_attribute_value(field, val, op), attr_values) 
+        updated_attr_values = Map.merge(format_expression_attribute_value(field, val, op), attr_values)
 
         build_filter_expression_data(exprs, {updated_filter_exprs, updated_attr_names, updated_attr_values})
 
@@ -229,14 +239,14 @@ defmodule Ecto.Adapters.DynamoDB.Query do
   @spec construct_conditional_statement({key, {term, query_op} | {[term], [query_op]}}) :: String.t
   defp construct_conditional_statement({field, {[_val1, _val2], [op1, op2]}}) do
     "##{field} #{to_string(op1)} :#{field <> "_val1"} and ##{field} #{to_string(op2)} :#{field <> "_val2"}"
-  end  
+  end
   defp construct_conditional_statement({field, {_val, :is_nil}}) do
     "(##{field} = :#{field <> "_val"} or attribute_not_exists(##{field}))"
   end
   defp construct_conditional_statement({field, {val, :in}}) do
     {result, _count} = Enum.reduce(val, {[], 1}, fn (_val, {acc, count}) ->
       {[":#{field}_val#{to_string(count)}" | acc], count + 1}
-    end)    
+    end)
     "(##{field} in (#{Enum.join(result, ",")}))"
   end
   defp construct_conditional_statement({field, {_val, :==}}) do
@@ -255,12 +265,17 @@ defmodule Ecto.Adapters.DynamoDB.Query do
   defp construct_batch_get_item_query(table, indexes, hash_values, search, opts) do
     take_opts = Keyword.take(opts, [:consistent_read, :projection_expression])
     keys = case indexes do
-      [hash_key] -> 
+      [hash_key] ->
         Enum.map(hash_values, fn hash_value -> [{String.to_atom(hash_key), hash_value}] end)
 
       [hash_key, range_key] ->
         {range_values, :in} = deep_find_key(search, range_key)
-        zipped = Enum.zip(hash_values, range_values)
+        IO.inspect [range_values, search, range_key, hash_values]
+        # zipped = Enum.zip(hash_values, range_values)
+        zipped =
+          hash_values
+          |> Enum.map(fn v -> Enum.zip(List.duplicate(v, length(range_values)), range_values) end)
+          |> :lists.concat
         Enum.map(zipped, fn {hash_value, range_value} ->
           [{String.to_atom(hash_key), hash_value}, {String.to_atom(range_key), range_value}]
         end)
@@ -324,9 +339,9 @@ defmodule Ecto.Adapters.DynamoDB.Query do
 
   @doc """
   Given a search criteria of 1 or more fields, we try find out if the primary key is a
-  good match and can be used to forfill this search. Returns the tuple 
+  good match and can be used to forfill this search. Returns the tuple
     {:primary, [hash] | [hash, range]}
-  or 
+  or
     :not_found
   """
   def get_matching_primary_index(tablename, search) do
@@ -365,7 +380,7 @@ defmodule Ecto.Adapters.DynamoDB.Query do
       :not_found ->
         case match_index_hash_part(index, search) do
           :not_found    -> find_best_match(indexes, search, best)    # haven't found anything good, keep looking, retain our previous best match.
-          index_partial -> find_best_match(indexes, search, index_partial) 
+          index_partial -> find_best_match(indexes, search, index_partial)
         end
     end
   end
@@ -386,7 +401,7 @@ defmodule Ecto.Adapters.DynamoDB.Query do
 
       {_, [hash]} ->
         hash_key = deep_find_key(search, hash)
-        if hash_key != nil and elem(hash_key, 1) in [:==, :in], 
+        if hash_key != nil and elem(hash_key, 1) in [:==, :in],
         do: index, else: :not_found
     end
   end
@@ -475,7 +490,7 @@ defmodule Ecto.Adapters.DynamoDB.Query do
 
     if scan_enabled do
       {filter_expression_tuple, expression_attribute_names, expression_attribute_values} = construct_filter_expression(search, [])
-        
+
       expressions = [
         expression_attribute_names: expression_attribute_names,
         expression_attribute_values: expression_attribute_values
@@ -495,8 +510,10 @@ defmodule Ecto.Adapters.DynamoDB.Query do
   @typep fetch_func :: (table_name, keyword -> ExAws.Operation.JSON.t)
   @spec fetch_recursive(fetch_func, table_name, keyword, boolean | number, map) :: dynamo_response
   defp fetch_recursive(func, table, expressions, recursive, result) do
+    t = :os.system_time(:millisecond)
     updated_expressions = if recursive == true, do: Keyword.delete(expressions, :limit), else: expressions
     fetch_result = func.(table, updated_expressions) |> ExAws.request!
+    IO.puts "GET ALL request (fetch recursive: fetch_result, request!) took: #{:os.system_time(:millisecond) - t}ms"
     # recursive can be a boolean or a page limit
     updated_recursive = update_recursive_option(recursive)
 
