@@ -29,22 +29,33 @@ defmodule Ecto.Adapters.DynamoDB.Query do
   # Regular queries
   def get_item(table, search, opts) do
     t = :os.system_time(:millisecond)
-    IO.puts "get_best_index!(table, search)"
-    IO.inspect get_best_index!(table, search)
+    ecto_dynamo_log(:debug, "get_best_index!(table, search): #{inspect(get_best_index!(table, search))}")
     results = case get_best_index!(table, search) do
       # primary key based lookup uses the efficient 'get_item' operation
       {:primary, indexes} = index->
         #https://hexdocs.pm/ex_aws/ExAws.Dynamo.html#get_item/3
-        query = construct_search(index, search, opts)
+        # query = construct_search(index, search, opts)
         # TODO: fix this shit!
         {_, op} = deep_find_key(search, List.last(indexes))
         {hash_values, _} = deep_find_key(search, hd(indexes))
 
-        hash_values = List.wrap(hash_values)
+        # hash_values = List.wrap(hash_values)
 
-        if op == :in,
-          do: ExAws.Dynamo.batch_get_item(construct_batch_get_item_query(table, indexes, hash_values, search, construct_opts(:get_item, opts))) |> ExAws.request!,
-          else: ExAws.Dynamo.get_item(table, query, construct_opts(:get_item, opts)) |> ExAws.request!
+        # if op == :in,
+        #   do: ExAws.Dynamo.batch_get_item(construct_batch_get_item_query(table, indexes, hash_values, search, construct_opts(:get_item, opts))) |> ExAws.request!,
+        #   else: ExAws.Dynamo.get_item(table, query, construct_opts(:get_item, opts)) |> ExAws.request!
+
+        case op do
+          :in ->
+            ExAws.Dynamo.batch_get_item(construct_batch_get_item_query(table, indexes, hash_values, search, construct_opts(:get_item, opts))) |> ExAws.request!
+          :== ->
+            # query = construct_search(index, search, opts)
+            ExAws.Dynamo.get_item(table, construct_search(index, search, opts), construct_opts(:get_item, opts)) |> ExAws.request!
+          _ ->
+            # TODO: fix and test this. Need to use range index when filter expression selected
+            query = construct_search({nil, indexes}, search, opts)
+            fetch_recursive(&ExAws.Dynamo.query/2, table, query, parse_recursive_option(:query, opts), %{})
+        end
 
       # secondary index based lookups need the query functionality.
       index when is_tuple(index) ->
@@ -54,7 +65,7 @@ defmodule Ecto.Adapters.DynamoDB.Query do
 
       :scan -> maybe_scan(table, search, opts)
     end
-    IO.puts "GET ALL request (w/o filter) took: #{:os.system_time(:millisecond) - t}ms"
+    ecto_dynamo_log(:debug, "GET ALL request (w/o filter) took: #{:os.system_time(:millisecond) - t}ms")
 
 
     filter(results, search)  # index may have had more fields than the index did, thus results need to be trimmed.
@@ -270,7 +281,7 @@ defmodule Ecto.Adapters.DynamoDB.Query do
 
       [hash_key, range_key] ->
         {range_values, :in} = deep_find_key(search, range_key)
-        IO.inspect [range_values, search, range_key, hash_values]
+        ecto_dynamo_log(:debug, "Construct BatchGetItem: #{inspect([range_values, search, range_key, hash_values])}")
         # zipped = Enum.zip(hash_values, range_values)
         zipped =
           hash_values
@@ -513,7 +524,7 @@ defmodule Ecto.Adapters.DynamoDB.Query do
     t = :os.system_time(:millisecond)
     updated_expressions = if recursive == true, do: Keyword.delete(expressions, :limit), else: expressions
     fetch_result = func.(table, updated_expressions) |> ExAws.request!
-    IO.puts "GET ALL request (fetch recursive: fetch_result, request!) took: #{:os.system_time(:millisecond) - t}ms"
+    ecto_dynamo_log(:debug, "GET ALL request (fetch recursive: fetch_result, request!) took: #{:os.system_time(:millisecond) - t}ms")
     # recursive can be a boolean or a page limit
     updated_recursive = update_recursive_option(recursive)
 
