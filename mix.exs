@@ -12,7 +12,7 @@ defmodule Ecto.Adapters.DynamoDB.Mixfile do
      docs: [main: "readme", extras: ["README.md"]],
      description: "A DynamoDB adapter for Ecto supporting basic queries. See https://github.com/circles-learning-labs/ecto_adapters_dynamodb for detailed instructions.",
      package: package(),
-     source_url: "https://github.com/circles-learning-labs/ecto_adapters_dynamodb"
+     source_url: "https://github.com/maxig/ecto_adapters_dynamodb"
     ]
   end
 
@@ -35,7 +35,7 @@ defmodule Ecto.Adapters.DynamoDB.Mixfile do
        scan_limit: 100,
        scan_tables: []
      ],
-     applications: [:ex_aws, :hackney, :poison]
+     applications: [:ex_aws, :ex_aws_dynamo, :hackney, :poison]
    ]
   end
 

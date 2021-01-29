@@ -189,6 +189,7 @@ defmodule Ecto.Adapters.DynamoDB do
 
     {table, model} = prepared.from
     validate_where_clauses!(prepared)
+    IO.inspect(["Lookup fields issue", prepared.wheres, params])
     lookup_fields = extract_lookup_fields(prepared.wheres, params, [])
 
     limit_option = opts[:scan_limit]
@@ -217,7 +218,9 @@ defmodule Ecto.Adapters.DynamoDB do
       :all ->
         ecto_dynamo_log(:info, "#{inspect __MODULE__}.execute: :all", %{"#{inspect __MODULE__}.execute-all-vars" => %{table: table, lookup_fields: lookup_fields, updated_opts: updated_opts}})
 
+        t = :os.system_time(:millisecond)
         result = Ecto.Adapters.DynamoDB.Query.get_item(table, lookup_fields, updated_opts)
+        IO.puts "GET ALL request took: #{:os.system_time(:millisecond) - t}ms"
 
         ecto_dynamo_log(:debug, "#{inspect __MODULE__}.execute: all: result", %{"#{inspect __MODULE__}.execute-all-result" => inspect result})
 
@@ -227,24 +230,30 @@ defmodule Ecto.Adapters.DynamoDB do
           # Empty map means "not found"
           {0, []}
         else
+          t = :os.system_time(:millisecond)
+
           sources =
             model.__schema__(:fields)
             |> Enum.into(%{}, fn f ->
               {model.__schema__(:field_source, f), f}
             end)
 
-          cond do
-            !result["Count"] and !result["Responses"] ->
-              decoded = decode_item(result["Item"], model, sources, prepared.select)
-              {1, [decoded]}
+          r =
+            cond do
+              !result["Count"] and !result["Responses"] ->
+                decoded = decode_item(result["Item"], model, sources, prepared.select)
+                {1, [decoded]}
 
-            true ->
-              # batch_get_item returns "Responses" rather than "Items"
-              results_to_decode = if result["Items"], do: result["Items"], else: result["Responses"][table]
+              true ->
+                # batch_get_item returns "Responses" rather than "Items"
+                results_to_decode = if result["Items"], do: result["Items"], else: result["Responses"][table]
 
-              decoded = Enum.map(results_to_decode, &(decode_item(&1, model, sources, prepared.select)))
-              {length(decoded), decoded}
-          end
+                decoded = Enum.map(results_to_decode, &(decode_item(&1, model, sources, prepared.select)))
+                {length(decoded), decoded}
+            end
+          IO.puts "GET ALL decoding took: #{:os.system_time(:millisecond) - t}ms"
+
+          r
         end
     end
   end
@@ -1041,6 +1050,8 @@ defmodule Ecto.Adapters.DynamoDB do
   end
 
   defp get_value({:^, _, [idx]}, params), do: Enum.at(params, idx)
+  # Test smth new
+  defp get_value({:^, _, idxs}, params) when length(idxs) == 2, do: Enum.slice(params, hd(idxs), List.last(idxs))
   # Handle queries with interpolated values
   # ex. Repo.all from i in Item, where: i.id in ^item_ids
   defp get_value({:^, _, _}, params), do: params
